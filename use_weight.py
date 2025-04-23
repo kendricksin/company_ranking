@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Enhanced Gradient Descent Model for Competitor Scoring with Direct Database Connection
+Pre-trained Gradient Model for Competitor Scoring
 
-This script implements an enhanced version of the gradient descent model
-that connects directly to the PostgreSQL database, with additional features
-and fine-tuning based on domain knowledge.
+This script applies a pre-trained gradient model with weights derived from 
+previous analysis to score potential competitors for any target company.
 """
 
 import os
@@ -12,8 +11,6 @@ import sys
 import asyncio
 import pandas as pd
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.preprocessing import StandardScaler
@@ -102,49 +99,63 @@ class DbConnection:
             return pd.DataFrame()
 
 
-class SimpleGradientDescentClassifier:
-    """Simple Logistic Regression Classifier trained with Gradient Descent."""
-    def __init__(self, learning_rate=0.01, iterations=1000, regularization=0.01):
-        self.lr = learning_rate
-        self.iter = iterations
-        self.regularization = regularization
+class PreTrainedModel:
+    """Simple pre-trained model that applies already-known weights."""
+    def __init__(self):
         self.weights = None
         self.bias = None
         self.scaler = StandardScaler()
         self.feature_names = None
+        
+        # Pre-trained weights from previous analysis
+        self.initialize_weights()
+        
+    def initialize_weights(self):
+        """Initialize with weights from previous analysis."""
+        # These are the feature weights from the COMPETITOR_RESULT.txt
+        self.feature_names = [
+            'common_subdepartments',
+            'total_win_value',
+            'common_projects',
+            'win_rate',
+            'dept_engagement_score',
+            'dept_wins',
+            'price_range_overlap',
+            'recent_activity_score',
+            'common_departments',
+            'subdept_specialization'
+        ]
+        
+        # Use the exact weights from the analysis
+        self.weights = np.array([
+            0.566131,   # common_subdepartments
+            0.543986,   # total_win_value
+            0.295185,   # common_projects
+            -0.278751,  # win_rate
+            -0.254573,  # dept_engagement_score
+            -0.254573,  # dept_wins
+            -0.248142,  # price_range_overlap
+            0.235438,   # recent_activity_score
+            0.088855,   # common_departments
+            -0.046462   # subdept_specialization
+        ])
+        
+        # Initialize bias to 0 - can be calibrated based on known competitors
+        self.bias = 0
 
     def sigmoid(self, z):
         # Clip input to avoid overflow in exp
         z_clipped = np.clip(z, -500, 500)
         return 1 / (1 + np.exp(-z_clipped))
-
-    def fit(self, X, y, feature_names=None):
-        n_samples, n_features = X.shape
-        self.feature_names = feature_names if feature_names is not None else [f"feature_{i}" for i in range(n_features)]
-
-        # Feature Scaling
-        X_scaled = self.scaler.fit_transform(X)
-
-        self.weights = np.zeros(n_features)
-        self.bias = 0
-
-        # Gradient Descent
-        for _ in range(self.iter):
-            linear_model = np.dot(X_scaled, self.weights) + self.bias
-            y_pred = self.sigmoid(linear_model)
-
-            # Compute gradients with L2 regularization
-            dw = (1/n_samples) * (np.dot(X_scaled.T, (y_pred - y)) + self.regularization * self.weights)
-            db = (1/n_samples) * np.sum(y_pred - y)
-
-            # Update weights
-            self.weights -= self.lr * dw
-            self.bias -= self.lr * db
-
+    
+    def fit_scaler(self, X):
+        """Fit the scaler to the data."""
+        self.scaler.fit(X)
+        
     def predict_proba(self, X):
         """Predicts probabilities (sigmoid output)."""
         if self.weights is None or self.bias is None:
-            raise Exception("Model has not been trained yet.")
+            raise Exception("Model weights not initialized.")
 
         X_scaled = self.scaler.transform(X)
         linear_model = np.dot(X_scaled, self.weights) + self.bias
@@ -158,38 +169,24 @@ class SimpleGradientDescentClassifier:
     def get_feature_weights(self):
         """Returns a dictionary of feature names and their weights."""
         if self.weights is None or self.feature_names is None:
-            raise Exception("Model has not been trained yet or feature names not set.")
+            raise Exception("Model weights not initialized.")
             
         return dict(zip(self.feature_names, self.weights))
 
 
-class DatabaseGradientModel:
-    """Class for building and analyzing a gradient model with direct database access."""
+class CompetitorAnalysis:
+    """Class for analyzing competitors using pre-trained weights."""
     
-    def __init__(self, db_conn):
-        """Initialize with database connection."""
+    def __init__(self, db_conn, target_tin=None):
+        """Initialize with database connection and target company TIN."""
         self.db = db_conn
         self.data = None
-        self.model = None
-        
-        # Configure known strong competitors and target company
-        # self.known_strong_competitors = [
-        #     "0105538044211",  # บริษัท ตรีสกุล จำกัด
-        #     "0105539121707",  # ห้างหุ้นส่วนจำกัด แสงนิยม
-        #     "0105553059231",  # บริษัท ปาล์ม คอน จำกัด
-        # ]
-        # self.target_company_tin = "0105561013814"  # บริษัท เรืองฤทัย จำกัด
-
-        self.known_strong_competitors = [
-            "0107536001001", # บริษัท ซิโน-ไทย เอ็นจีเนียริ่ง แอนด์ คอนสตรัคชั่น จำกัด (มหาชน)
-            "0105509002602", # บริษัท ซีวิล คอนสตรัคชั่น เซอร์วิสเซส แอนด์ โปรดักส์ จำกัด
-            "0107545000217", # บริษัท เพาเวอร์ไลน์ เอ็นจิเนียริ่ง จำกัด (มหาชน)
-        ]
-        self.target_company_tin = "0107537000939" # Italian Thai
-        
-        # Set output directory
-        self.output_dir = 'gradient_output'
+        self.model = PreTrainedModel()
+        self.output_dir = 'competitor_analysis_output'
         os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Set target company TIN
+        self.target_company_tin = target_tin
     
     async def get_target_company_info(self):
         """Get detailed information about the target company."""
@@ -551,25 +548,14 @@ class DatabaseGradientModel:
         
         return pd.Series(recent_scores)
     
-    def build_gradient_model(self, data):
-        """Build gradient descent model with the enhanced feature set."""
-        logger.info("Building gradient model with enhanced features")
+    def apply_model(self, data):
+        """Apply the pre-trained model to score competitors."""
+        logger.info("Applying pre-trained model with known weights")
         
         self.data = data
         
-        # Select features for the model
-        selected_features = [
-            'common_projects',           # Number of direct project overlaps
-            'common_departments',        # Number of departments in common
-            'common_subdepartments',     # Number of subdepartments in common
-            'dept_wins',                 # Wins in departments where target company operates
-            'total_win_value',           # Total value of won projects
-            'win_rate',                  # Percentage of projects won
-            'price_range_overlap',       # Project value range similarity
-            'recent_activity_score',     # Recent competitive activity
-            'dept_engagement_score',     # Department engagement metric
-            'subdept_specialization'     # Subdepartment specialization
-        ]
+        # Select features in the exact same order as the model was trained
+        selected_features = self.model.feature_names
         
         # Ensure all selected features exist
         missing_features = [f for f in selected_features if f not in self.data.columns]
@@ -577,63 +563,28 @@ class DatabaseGradientModel:
             logger.error(f"Selected features missing from data: {missing_features}")
             return False
         
-        # Prepare features and labels
+        # Prepare features
         X = self.data[selected_features].values
         
-        # Create labels for known competitors (1) and others (0)
-        y = np.zeros(len(self.data))
-        known_indices = self.data[self.data['tin'].isin(self.known_strong_competitors)].index
-        y[known_indices] = 1
+        # Fit the scaler on the new data
+        self.model.fit_scaler(X)
         
-        # Train the model
-        self.model = SimpleGradientDescentClassifier(
-            learning_rate=0.05, 
-            iterations=2000, 
-            regularization=0.02
-        )
-        self.model.fit(X, y, feature_names=selected_features)
-        
-        # Calculate model predictions
-        y_pred = self.model.predict(X)
-        accuracy = np.mean(y_pred == y)
-        known_accuracy = np.mean(y_pred[known_indices] == y[known_indices])
-        
-        logger.info(f"Model trained with {len(selected_features)} features")
-        logger.info(f"Overall accuracy: {accuracy:.4f}")
-        logger.info(f"Accuracy on known competitors: {known_accuracy:.4f}")
-        
-        # Calculate gradient scores
+        # Calculate gradient scores using pre-trained weights
         self.data['gradient_score'] = self.model.predict_proba(X) * 100
         
         return True
     
     def analyze_rankings(self):
-        """Analyze the rankings produced by the gradient model."""
-        logger.info("Analyzing gradient model rankings")
+        """Analyze the rankings produced by the model."""
+        logger.info("Analyzing model rankings")
         
         # Sort by gradient score
         sorted_df = self.data.sort_values('gradient_score', ascending=False).reset_index(drop=True)
         sorted_df['rank'] = sorted_df.index + 1
         
-        # Find ranks of known competitors
-        known_ranks = []
-        for tin in self.known_strong_competitors:
-            rank_row = sorted_df[sorted_df['tin'] == tin]
-            if not rank_row.empty:
-                known_ranks.append((
-                    rank_row['name'].iloc[0],
-                    rank_row['rank'].iloc[0],
-                    rank_row['gradient_score'].iloc[0]
-                ))
-        
-        # Calculate ranking metrics
-        avg_rank = np.mean([r[1] for r in known_ranks])
-        median_rank = np.median([r[1] for r in known_ranks])
-        top_10_count = sum(1 for r in known_ranks if r[1] <= 10)
-        
         # Print results
         print("\n" + "="*80)
-        print("ENHANCED GRADIENT MODEL RANKING ANALYSIS")
+        print("PRE-TRAINED MODEL COMPETITOR ANALYSIS")
         print("="*80)
         
         print(f"\nModel features ({len(self.model.feature_names)}):")
@@ -645,24 +596,15 @@ class DatabaseGradientModel:
         top_10 = sorted_df.head(10)[['rank', 'name', 'tin', 'gradient_score', 'common_projects', 'win_rate']]
         print(tabulate(top_10, headers='keys', tablefmt='grid', showindex=False))
         
-        print("\nKnown strong competitors ranking:")
-        for name, rank, score in known_ranks:
-            print(f"  {name}: Rank {rank}, Score: {score:.2f}")
-        
-        print(f"\nRanking metrics:")
-        print(f"  Average rank of known competitors: {avg_rank:.2f}")
-        print(f"  Median rank of known competitors: {median_rank:.2f}")
-        print(f"  Known competitors in top 10: {top_10_count} out of {len(known_ranks)}")
-        
         # Save to CSV
-        output_csv = os.path.join(self.output_dir, 'gradient_scores.csv')
+        output_csv = os.path.join(self.output_dir, f'competitor_scores_{self.target_company_tin}.csv')
         sorted_df.to_csv(output_csv, index=False)
-        logger.info(f"Saved gradient scores to {output_csv}")
+        logger.info(f"Saved competitor scores to {output_csv}")
         
         return sorted_df
     
     def visualize_results(self):
-        """Create visualizations for the gradient model results."""
+        """Create visualizations for the model results."""
         logger.info("Creating visualizations...")
         
         # Visualize feature weights
@@ -671,9 +613,6 @@ class DatabaseGradientModel:
         # Visualize top companies
         self._visualize_top_companies()
         
-        # Visualize feature correlations
-        self._visualize_feature_correlations()
-    
     def _visualize_feature_weights(self):
         """Visualize feature weights from the model."""
         plt.figure(figsize=(12, 8))
@@ -701,12 +640,12 @@ class DatabaseGradientModel:
                     f'{width:.4f}', va='center', ha=alignment, fontweight='bold')
         
         plt.axvline(x=0, color='gray', linestyle='-', alpha=0.3)
-        plt.title('Feature Weights in Enhanced Gradient Model', fontsize=16)
+        plt.title('Feature Weights in Pre-trained Model', fontsize=16)
         plt.xlabel('Weight Value', fontsize=12)
         plt.tight_layout()
         
         # Save the figure
-        output_file = os.path.join(self.output_dir, 'feature_weights.png')
+        output_file = os.path.join(self.output_dir, f'feature_weights_{self.target_company_tin}.png')
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         plt.close()
         logger.info(f"Feature weights visualization saved to {output_file}")
@@ -731,12 +670,6 @@ class DatabaseGradientModel:
             alpha=0.8
         )
         
-        # Highlight known competitors
-        for i, (_, row) in enumerate(top_companies.iterrows()):
-            if row['tin'] in self.known_strong_competitors:
-                bars[i].set_color('red')
-                bars[i].set_alpha(1.0)
-        
         # Add score labels
         for bar in bars:
             width = bar.get_width()
@@ -747,110 +680,46 @@ class DatabaseGradientModel:
                 va='center'
             )
         
-        plt.title(f'Top {top_n} Companies by Gradient Score', fontsize=14)
+        plt.title(f'Top {top_n} Competitors for {self.target_company_tin}', fontsize=14)
         plt.xlabel('Gradient Score', fontsize=12)
         plt.ylabel('')
         plt.grid(axis='x', alpha=0.3)
-        
-        # Add legend manually
-        import matplotlib.patches as mpatches
-        red_patch = mpatches.Patch(color='red', label='Known Strong Competitors')
-        blue_patch = mpatches.Patch(color='skyblue', label='Other Companies')
-        plt.legend(handles=[red_patch, blue_patch], loc='lower right')
-        
         plt.tight_layout()
         
         # Save the figure
-        output_file = os.path.join(self.output_dir, 'top_companies.png')
+        output_file = os.path.join(self.output_dir, f'top_competitors_{self.target_company_tin}.png')
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         plt.close()
-        logger.info(f"Top companies visualization saved to {output_file}")
-    
-    def _visualize_feature_correlations(self):
-        """Visualize correlations between features and gradient score."""
-        # Get feature names used in the model
-        features = self.model.feature_names
-        
-        # Add gradient score
-        columns_to_correlate = features + ['gradient_score']
-        
-        # Calculate correlation matrix
-        corr_matrix = self.data[columns_to_correlate].corr()
-        
-        # Create heatmap
-        plt.figure(figsize=(12, 10))
-        sns.heatmap(
-            corr_matrix, 
-            annot=True, 
-            cmap='coolwarm', 
-            vmin=-1, 
-            vmax=1, 
-            center=0,
-            fmt='.2f',
-            linewidths=0.5
-        )
-        plt.title('Feature Correlation Matrix', fontsize=16)
-        plt.tight_layout()
-        
-        # Save the figure
-        output_file = os.path.join(self.output_dir, 'feature_correlations.png')
-        plt.savefig(output_file, dpi=300, bbox_inches='tight')
-        plt.close()
-        logger.info(f"Feature correlations visualization saved to {output_file}")
-
-
-async def main():
-    """Main entry point for the script."""
-    start_time = datetime.now()
-    logger.info("Starting Enhanced Gradient Model")
-    
-    # Initialize database connection
-    db = DbConnection()
-    await db.initialize()
-    
-    try:
-        # Create model
-        model = DatabaseGradientModel(db)
-        
-        # Get target company information
-        target_company = await model.get_target_company_info()
-        if not target_company:
-            logger.error(f"Target company {model.target_company_tin} not found")
-            return
-        
-        # Get all competitors
-        competitors_df = await model.get_all_competitors(lookback_months=60)
-        if competitors_df.empty:
-            logger.error("No competitors found for analysis")
-            return
-        
-        # Calculate additional metrics
-        enhanced_df = await model.calculate_additional_metrics(competitors_df, target_company)
-        
-        # Build gradient model
-        if not model.build_gradient_model(enhanced_df):
-            logger.error("Failed to build gradient model")
-            return
-        
-        # Analyze rankings
-        sorted_df = model.analyze_rankings()
-        
-        # Create visualizations
-        model.visualize_results()
-        
-        logger.info("Enhanced gradient model analysis complete")
-        
-    except Exception as e:
-        logger.error(f"Error in main execution: {str(e)}")
-    finally:
-        # Close database connection
-        await db.close()
-        elapsed_time = (datetime.now() - start_time).total_seconds()
-        logger.info(f"Script execution completed in {elapsed_time:.2f} seconds")
-
+        logger.info(f"Top competitors visualization saved to {output_file}")
 
 if __name__ == "__main__":
-    # Ensure event loop compatibility for different OS
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    # Example usage
+    async def main():
+        db_conn = DbConnection()
+        await db_conn.initialize()
+        
+        target_tin = "0105543041542"  # Replace with actual TIN
+        competitor_analysis = CompetitorAnalysis(db_conn, target_tin)
+        
+        target_company_info = await competitor_analysis.get_target_company_info()
+        if not target_company_info:
+            logger.error("No target company information found. Exiting.")
+            return
+        
+        competitors_df = await competitor_analysis.get_all_competitors(lookback_months=60)
+        if competitors_df.empty:
+            logger.error("No competitors found. Exiting.")
+            return
+        
+        competitors_df = await competitor_analysis.calculate_additional_metrics(competitors_df, target_company_info)
+        
+        if not competitor_analysis.apply_model(competitors_df):
+            logger.error("Model application failed. Exiting.")
+            return
+        
+        sorted_results = competitor_analysis.analyze_rankings()
+        competitor_analysis.visualize_results()
+        
+        await db_conn.close()
+
     asyncio.run(main())
