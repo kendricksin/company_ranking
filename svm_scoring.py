@@ -17,6 +17,7 @@ matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC  # Import SVM classifier
 from tabulate import tabulate
 import logging
 import asyncpg
@@ -101,6 +102,74 @@ class DbConnection:
             # Return empty DataFrame instead of raising to allow partial processing
             return pd.DataFrame()
 
+class SVMClassifier:
+    """Support Vector Machine Classifier wrapper."""
+    def __init__(self, C=1.0, kernel='rbf', gamma='scale', class_weight='balanced'):
+        self.C = C  # Regularization parameter
+        self.kernel = kernel  # Kernel type
+        self.gamma = gamma  # Kernel coefficient
+        self.class_weight = class_weight  # Class weight
+        self.model = SVC(
+            C=self.C,
+            kernel=self.kernel,
+            gamma=self.gamma,
+            class_weight=self.class_weight,
+            probability=True  # Enable probability estimates
+        )
+        self.scaler = StandardScaler()
+        self.feature_names = None
+
+    def fit(self, X, y, feature_names=None):
+        n_samples, n_features = X.shape
+        self.feature_names = feature_names if feature_names is not None else [f"feature_{i}" for i in range(n_features)]
+
+        # Feature Scaling
+        X_scaled = self.scaler.fit_transform(X)
+
+        # Train SVM model
+        self.model.fit(X_scaled, y)
+        return self
+
+    def predict_proba(self, X):
+        """Predicts probabilities."""
+        if self.model is None:
+            raise Exception("Model has not been trained yet.")
+
+        X_scaled = self.scaler.transform(X)
+        # Return probabilities for the positive class (class 1)
+        return self.model.predict_proba(X_scaled)[:, 1]
+
+    def predict(self, X, threshold=0.5):
+        """Predicts class labels based on threshold."""
+        probabilities = self.predict_proba(X)
+        return np.where(probabilities >= threshold, 1, 0)
+
+    def get_feature_weights(self):
+        """Returns a dictionary of feature names and their importance scores."""
+        if self.model is None or self.feature_names is None:
+            raise Exception("Model has not been trained yet or feature names not set.")
+            
+        # For linear kernel, we can use coefficients directly
+        if self.kernel == 'linear':
+            weights = self.model.coef_[0]
+            return dict(zip(self.feature_names, weights))
+        
+        # For non-linear kernels, use coefficients of the support vectors
+        # This is an approximation of feature importance
+        else:
+            # Get absolute sum of dual coefficients for each support vector
+            sv_coef_abs_sum = np.abs(self.model.dual_coef_).sum(axis=0)
+            
+            # For each feature, calculate importance as weighted sum of support vector values
+            feature_weights = {}
+            X_support = self.scaler.inverse_transform(self.model.support_vectors_)
+            
+            for i, feature_name in enumerate(self.feature_names):
+                importance = np.sum(X_support[:, i] * sv_coef_abs_sum)
+                # Normalize to have similar scale as gradient descent weights
+                feature_weights[feature_name] = importance / np.sum(np.abs(importance)) 
+            
+            return feature_weights
 
 class SimpleGradientDescentClassifier:
     """Simple Logistic Regression Classifier trained with Gradient Descent."""
@@ -174,11 +243,11 @@ class DatabaseGradientModel:
         
         # Configure known strong competitors and target company
         self.known_strong_competitors = [
-            "0105538044211",  # บริษัท ตรีสกุล จำกัด
-            "0105539121707",  # ห้างหุ้นส่วนจำกัด แสงนิยม
-            "0105553059231",  # บริษัท ปาล์ม คอน จำกัด
+            "0105540085581",  # บริษัท ตรีสกุล จำกัด
+            "0103503000975",  # ห้างหุ้นส่วนจำกัด แสงนิยม
+            "0105538044211",  # บริษัท ปาล์ม คอน จำกัด
         ]
-        self.target_company_tin = "0105561013814"  # บริษัท เรืองฤทัย จำกัด
+        self.target_company_tin = "0105543041542"  # บริษัท เรืองฤทัย จำกัด
         
         # Set output directory
         self.output_dir = 'gradient_output'
@@ -543,10 +612,10 @@ class DatabaseGradientModel:
             recent_scores.append(avg_score)
         
         return pd.Series(recent_scores)
-    
+        
     def build_gradient_model(self, data):
-        """Build gradient descent model with the enhanced feature set."""
-        logger.info("Building gradient model with enhanced features")
+        """Build SVM model with the enhanced feature set."""
+        logger.info("Building SVM model with enhanced features")
         
         self.data = data
         
@@ -578,11 +647,12 @@ class DatabaseGradientModel:
         known_indices = self.data[self.data['tin'].isin(self.known_strong_competitors)].index
         y[known_indices] = 1
         
-        # Train the model
-        self.model = SimpleGradientDescentClassifier(
-            learning_rate=0.05, 
-            iterations=2000, 
-            regularization=0.02
+        # Train the model - using SVM instead of gradient descent
+        self.model = SVMClassifier(
+            C=1.0,                 # Regularization parameter
+            kernel='rbf',          # Radial basis function kernel
+            gamma='scale',         # Kernel coefficient
+            class_weight='balanced' # Handle class imbalance
         )
         self.model.fit(X, y, feature_names=selected_features)
         
@@ -591,21 +661,21 @@ class DatabaseGradientModel:
         accuracy = np.mean(y_pred == y)
         known_accuracy = np.mean(y_pred[known_indices] == y[known_indices])
         
-        logger.info(f"Model trained with {len(selected_features)} features")
+        logger.info(f"SVM model trained with {len(selected_features)} features")
         logger.info(f"Overall accuracy: {accuracy:.4f}")
         logger.info(f"Accuracy on known competitors: {known_accuracy:.4f}")
         
-        # Calculate gradient scores
-        self.data['gradient_score'] = self.model.predict_proba(X) * 100
+        # Calculate scores
+        self.data['svm_score'] = self.model.predict_proba(X) * 100
         
         return True
     
     def analyze_rankings(self):
-        """Analyze the rankings produced by the gradient model."""
-        logger.info("Analyzing gradient model rankings")
+        """Analyze the rankings produced by the SVM model."""
+        logger.info("Analyzing SVM model rankings")
         
-        # Sort by gradient score
-        sorted_df = self.data.sort_values('gradient_score', ascending=False).reset_index(drop=True)
+        # Sort by SVM score
+        sorted_df = self.data.sort_values('svm_score', ascending=False).reset_index(drop=True)
         sorted_df['rank'] = sorted_df.index + 1
         
         # Find ranks of known competitors
@@ -616,7 +686,7 @@ class DatabaseGradientModel:
                 known_ranks.append((
                     rank_row['name'].iloc[0],
                     rank_row['rank'].iloc[0],
-                    rank_row['gradient_score'].iloc[0]
+                    rank_row['svm_score'].iloc[0]
                 ))
         
         # Calculate ranking metrics
@@ -626,7 +696,7 @@ class DatabaseGradientModel:
         
         # Print results
         print("\n" + "="*80)
-        print("ENHANCED GRADIENT MODEL RANKING ANALYSIS")
+        print("SVM MODEL RANKING ANALYSIS")
         print("="*80)
         
         print(f"\nModel features ({len(self.model.feature_names)}):")
@@ -634,8 +704,8 @@ class DatabaseGradientModel:
         for feature, weight in sorted(feature_weights.items(), key=lambda x: abs(x[1]), reverse=True):
             print(f"  {feature:<25}: {weight:+.6f}")
         
-        print("\nTop 10 competitors by gradient score:")
-        top_10 = sorted_df.head(10)[['rank', 'name', 'tin', 'gradient_score', 'common_projects', 'win_rate']]
+        print("\nTop 10 competitors by SVM score:")
+        top_10 = sorted_df.head(10)[['rank', 'name', 'tin', 'svm_score', 'common_projects', 'win_rate']]
         print(tabulate(top_10, headers='keys', tablefmt='grid', showindex=False))
         
         print("\nKnown strong competitors ranking:")
@@ -648,9 +718,9 @@ class DatabaseGradientModel:
         print(f"  Known competitors in top 10: {top_10_count} out of {len(known_ranks)}")
         
         # Save to CSV
-        output_csv = os.path.join(self.output_dir, 'gradient_scores.csv')
+        output_csv = os.path.join(self.output_dir, 'svm_scores.csv')
         sorted_df.to_csv(output_csv, index=False)
-        logger.info(f"Saved gradient scores to {output_csv}")
+        logger.info(f"Saved SVM scores to {output_csv}")
         
         return sorted_df
     
@@ -705,10 +775,10 @@ class DatabaseGradientModel:
         logger.info(f"Feature weights visualization saved to {output_file}")
     
     def _visualize_top_companies(self):
-        """Visualize top companies by gradient score."""
+        """Visualize top companies by SVM score."""
         # Get top companies
         top_n = 15
-        top_companies = self.data.sort_values('gradient_score', ascending=False).head(top_n)
+        top_companies = self.data.sort_values('svm_score', ascending=False).head(top_n)
         
         plt.figure(figsize=(12, 8))
         
@@ -718,7 +788,7 @@ class DatabaseGradientModel:
         # Create horizontal bar chart
         bars = plt.barh(
             display_names, 
-            top_companies['gradient_score'],
+            top_companies['svm_score'],
             color='skyblue',
             edgecolor='gray',
             alpha=0.8
@@ -740,8 +810,8 @@ class DatabaseGradientModel:
                 va='center'
             )
         
-        plt.title(f'Top {top_n} Companies by Gradient Score', fontsize=14)
-        plt.xlabel('Gradient Score', fontsize=12)
+        plt.title(f'Top {top_n} Companies by SVM Score', fontsize=14)
+        plt.xlabel('SVM Score', fontsize=12)
         plt.ylabel('')
         plt.grid(axis='x', alpha=0.3)
         
@@ -758,14 +828,14 @@ class DatabaseGradientModel:
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         plt.close()
         logger.info(f"Top companies visualization saved to {output_file}")
-    
+
     def _visualize_feature_correlations(self):
-        """Visualize correlations between features and gradient score."""
+        """Visualize correlations between features and SVM score."""
         # Get feature names used in the model
         features = self.model.feature_names
         
-        # Add gradient score
-        columns_to_correlate = features + ['gradient_score']
+        # Add SVM score
+        columns_to_correlate = features + ['svm_score']
         
         # Calculate correlation matrix
         corr_matrix = self.data[columns_to_correlate].corr()

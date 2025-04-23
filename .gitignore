@@ -5,3 +5,4 @@ venv/
 scoring_results/
 gradient_output/
 ranking_verification_output/
+poly_output/

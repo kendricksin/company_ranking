@@ -16,7 +16,10 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import cross_val_score, KFold
 from tabulate import tabulate
 import logging
 import asyncpg
@@ -102,65 +105,114 @@ class DbConnection:
             return pd.DataFrame()
 
 
-class SimpleGradientDescentClassifier:
-    """Simple Logistic Regression Classifier trained with Gradient Descent."""
-    def __init__(self, learning_rate=0.01, iterations=1000, regularization=0.01):
-        self.lr = learning_rate
-        self.iter = iterations
+class SklearnPolynomialModel:
+    """Gradient Descent Model using scikit-learn's PolynomialFeatures."""
+    def __init__(self, degree=2, include_bias=False, interaction_only=False, 
+                 regularization=0.01, max_iter=1000):
+        """
+        Initialize the model with polynomial feature configuration.
+        
+        Args:
+            degree: The degree of the polynomial features (2 = squares and interactions)
+            include_bias: Whether to include a bias column (constant feature)
+            interaction_only: If True, only include interaction features, no powers
+            regularization: L2 regularization strength (C is inverse of regularization)
+            max_iter: Maximum number of iterations for logistic regression
+        """
+        self.degree = degree
+        self.include_bias = include_bias
+        self.interaction_only = interaction_only
         self.regularization = regularization
-        self.weights = None
-        self.bias = None
-        self.scaler = StandardScaler()
-        self.feature_names = None
-
-    def sigmoid(self, z):
-        # Clip input to avoid overflow in exp
-        z_clipped = np.clip(z, -500, 500)
-        return 1 / (1 + np.exp(-z_clipped))
-
+        self.max_iter = max_iter
+        
+        # Create pipeline with polynomial features, scaling, and logistic regression
+        self.pipeline = Pipeline([
+            ('polynomial', PolynomialFeatures(degree=degree, 
+                                              include_bias=include_bias,
+                                              interaction_only=interaction_only)),
+            ('scaler', StandardScaler()),
+            ('classifier', LogisticRegression(penalty='l2',
+                                             C=1/regularization,
+                                             max_iter=max_iter,
+                                             solver='liblinear'))
+        ])
+        
+        self.feature_names_in_ = None
+        self.poly_feature_names_ = None
+        
     def fit(self, X, y, feature_names=None):
-        n_samples, n_features = X.shape
-        self.feature_names = feature_names if feature_names is not None else [f"feature_{i}" for i in range(n_features)]
-
-        # Feature Scaling
-        X_scaled = self.scaler.fit_transform(X)
-
-        self.weights = np.zeros(n_features)
-        self.bias = 0
-
-        # Gradient Descent
-        for _ in range(self.iter):
-            linear_model = np.dot(X_scaled, self.weights) + self.bias
-            y_pred = self.sigmoid(linear_model)
-
-            # Compute gradients with L2 regularization
-            dw = (1/n_samples) * (np.dot(X_scaled.T, (y_pred - y)) + self.regularization * self.weights)
-            db = (1/n_samples) * np.sum(y_pred - y)
-
-            # Update weights
-            self.weights -= self.lr * dw
-            self.bias -= self.lr * db
-
+        """
+        Fit the model to the data.
+        
+        Args:
+            X: Feature matrix
+            y: Target vector (0 or 1)
+            feature_names: Names of the input features
+        
+        Returns:
+            self
+        """
+        # Store original feature names
+        self.feature_names_in_ = (feature_names if feature_names is not None 
+                                else [f"feature_{i}" for i in range(X.shape[1])])
+        
+        # Fit the pipeline
+        self.pipeline.fit(X, y)
+        
+        # Get polynomial feature names
+        poly = self.pipeline.named_steps['polynomial']
+        self.poly_feature_names_ = poly.get_feature_names_out(self.feature_names_in_)
+        
+        return self
+    
     def predict_proba(self, X):
-        """Predicts probabilities (sigmoid output)."""
-        if self.weights is None or self.bias is None:
-            raise Exception("Model has not been trained yet.")
-
-        X_scaled = self.scaler.transform(X)
-        linear_model = np.dot(X_scaled, self.weights) + self.bias
-        return self.sigmoid(linear_model)
-
+        """Predict class probabilities."""
+        return self.pipeline.predict_proba(X)[:, 1]  # Return probability of class 1
+    
     def predict(self, X, threshold=0.5):
-        """Predicts class labels based on threshold."""
-        probabilities = self.predict_proba(X)
-        return np.where(probabilities >= threshold, 1, 0)
-
+        """Predict class labels using a threshold."""
+        probas = self.predict_proba(X)
+        return (probas >= threshold).astype(int)
+    
     def get_feature_weights(self):
-        """Returns a dictionary of feature names and their weights."""
-        if self.weights is None or self.feature_names is None:
-            raise Exception("Model has not been trained yet or feature names not set.")
-            
-        return dict(zip(self.feature_names, self.weights))
+        """Return dictionary mapping feature names to their weights."""
+        classifier = self.pipeline.named_steps['classifier']
+        weights = classifier.coef_[0]
+        
+        if self.poly_feature_names_ is None:
+            raise ValueError("Model has not been trained yet")
+        
+        return dict(zip(self.poly_feature_names_, weights))
+    
+    def get_feature_importance(self):
+        """Return normalized feature importance based on absolute weights."""
+        weights_dict = self.get_feature_weights()
+        abs_weights = np.abs(list(weights_dict.values()))
+        
+        # Normalize to sum to 100
+        importance = (abs_weights / abs_weights.sum()) * 100
+        
+        return dict(zip(weights_dict.keys(), importance))
+    
+    @property
+    def feature_names(self):
+        """Get the input feature names (for compatibility with the previous model)."""
+        return self.feature_names_in_
+    
+    def evaluate_cv(self, X, y, cv=5):
+        """Evaluate model with cross-validation."""
+        # Accuracy
+        accuracy = cross_val_score(self.pipeline, X, y, cv=cv, scoring='accuracy')
+        
+        # AUC
+        auc = cross_val_score(self.pipeline, X, y, cv=cv, scoring='roc_auc')
+        
+        return {
+            'accuracy_mean': accuracy.mean(),
+            'accuracy_std': accuracy.std(),
+            'auc_mean': auc.mean(),
+            'auc_std': auc.std()
+        }
 
 
 class DatabaseGradientModel:
@@ -174,14 +226,14 @@ class DatabaseGradientModel:
         
         # Configure known strong competitors and target company
         self.known_strong_competitors = [
-            "0105538044211",  # บริษัท ตรีสกุล จำกัด
-            "0105539121707",  # ห้างหุ้นส่วนจำกัด แสงนิยม
-            "0105553059231",  # บริษัท ปาล์ม คอน จำกัด
+            "0105540085581",  # บริษัท ตรีสกุล จำกัด
+            "0103503000975",  # ห้างหุ้นส่วนจำกัด แสงนิยม
+            "0105538044211",  # บริษัท ปาล์ม คอน จำกัด
         ]
-        self.target_company_tin = "0105561013814"  # บริษัท เรืองฤทัย จำกัด
+        self.target_company_tin = "0105543041542"  # บริษัท เรืองฤทัย จำกัด
         
         # Set output directory
-        self.output_dir = 'gradient_output'
+        self.output_dir = 'poly_output'
         os.makedirs(self.output_dir, exist_ok=True)
     
     async def get_target_company_info(self):
@@ -545,8 +597,8 @@ class DatabaseGradientModel:
         return pd.Series(recent_scores)
     
     def build_gradient_model(self, data):
-        """Build gradient descent model with the enhanced feature set."""
-        logger.info("Building gradient model with enhanced features")
+        """Build gradient descent model with sklearn polynomial features."""
+        logger.info("Building gradient model with sklearn polynomial features")
         
         self.data = data
         
@@ -578,12 +630,15 @@ class DatabaseGradientModel:
         known_indices = self.data[self.data['tin'].isin(self.known_strong_competitors)].index
         y[known_indices] = 1
         
-        # Train the model
-        self.model = SimpleGradientDescentClassifier(
-            learning_rate=0.05, 
-            iterations=2000, 
-            regularization=0.02
+        # Create and train the model
+        self.model = SklearnPolynomialModel(
+            degree=2,                 # Square and interaction terms
+            include_bias=False,       # No bias term (handled separately)
+            interaction_only=False,   # Include both interactions and powers
+            regularization=0.1,       # L2 regularization strength
+            max_iter=2000             # Maximum iterations for convergence
         )
+        
         self.model.fit(X, y, feature_names=selected_features)
         
         # Calculate model predictions
@@ -591,14 +646,204 @@ class DatabaseGradientModel:
         accuracy = np.mean(y_pred == y)
         known_accuracy = np.mean(y_pred[known_indices] == y[known_indices])
         
-        logger.info(f"Model trained with {len(selected_features)} features")
+        # Get count of features
+        total_features = len(self.model.poly_feature_names_)
+        original_features = len(selected_features)
+        added_features = total_features - original_features
+        
+        logger.info(f"Model trained with {original_features} original features and {added_features} polynomial features")
+        logger.info(f"Total features: {total_features}")
         logger.info(f"Overall accuracy: {accuracy:.4f}")
         logger.info(f"Accuracy on known competitors: {known_accuracy:.4f}")
+        
+        # Get performance metrics with cross-validation
+        cv_metrics = self.model.evaluate_cv(X, y, cv=5)
+        logger.info(f"Cross-validation AUC: {cv_metrics['auc_mean']:.4f} ± {cv_metrics['auc_std']:.4f}")
         
         # Calculate gradient scores
         self.data['gradient_score'] = self.model.predict_proba(X) * 100
         
         return True
+
+    def evaluate_models_with_cv(self, data, feature_sets=None, k_folds=5):
+        """
+        Evaluate different models with sklearn's polynomial features using k-fold cross-validation.
+        
+        Args:
+            data: DataFrame with features and target labels
+            feature_sets: Dict of feature set name to list of feature names
+            k_folds: Number of folds for cross-validation
+        
+        Returns:
+            DataFrame with evaluation results
+        """
+        logger.info(f"Evaluating models with {k_folds}-fold cross-validation using sklearn")
+        
+        if feature_sets is None:
+            # Default feature sets to compare
+            selected_features = [
+                'common_projects',
+                'common_departments',
+                'common_subdepartments',
+                'dept_wins',
+                'total_win_value',
+                'win_rate',
+                'price_range_overlap',
+                'recent_activity_score',
+                'dept_engagement_score',
+                'subdept_specialization'
+            ]
+            
+            feature_sets = {
+                "Basic": ['common_projects', 'common_departments', 'win_rate'],
+                "Standard": ['common_projects', 'common_departments', 'dept_wins', 
+                        'total_win_value', 'win_rate'],
+                "Full": selected_features,
+            }
+        
+        # Configurations to test
+        model_configs = [
+            {
+                "name": "Linear",
+                "degree": 1,  # Linear model, no polynomial features
+                "interaction_only": False,
+                "regularization": 0.1
+            },
+            {
+                "name": "Poly (Degree 2)",
+                "degree": 2,  # Square terms and interactions
+                "interaction_only": False,
+                "regularization": 0.1
+            },
+            {
+                "name": "Interactions Only",
+                "degree": 2,
+                "interaction_only": True,  # Only interaction terms, no squared terms
+                "regularization": 0.1
+            }
+        ]
+        
+        # Prepare results storage
+        results = []
+        
+        # Create labels for known competitors (1) and others (0)
+        known_competitors = np.zeros(len(data))
+        known_indices = data[data['tin'].isin(self.known_strong_competitors)].index
+        known_competitors[known_indices] = 1
+        
+        # Run cross-validation for each feature set and model config
+        kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
+        
+        for feature_set_name, features in feature_sets.items():
+            # Ensure all features exist
+            missing_features = [f for f in features if f not in data.columns]
+            if missing_features:
+                logger.warning(f"Feature set '{feature_set_name}' has missing features: {missing_features}")
+                continue
+            
+            # Extract feature matrix
+            X = data[features].values
+            y = known_competitors
+            
+            for config in model_configs:
+                model_name = config["name"]
+                logger.info(f"Evaluating {model_name} model with {feature_set_name} features")
+                
+                model = SklearnPolynomialModel(
+                    degree=config["degree"],
+                    interaction_only=config["interaction_only"],
+                    regularization=config["regularization"]
+                )
+                
+                metrics = model.evaluate_cv(X, y, cv=kf)
+                
+                # Store results
+                results.append({
+                    "Feature Set": feature_set_name,
+                    "Model": model_name,
+                    "Accuracy": metrics["accuracy_mean"],
+                    "Accuracy Std": metrics["accuracy_std"],
+                    "AUC": metrics["auc_mean"],
+                    "AUC Std": metrics["auc_std"],
+                    "Feature Count": len(features),
+                    "Degree": config["degree"],
+                    "Interactions Only": config["interaction_only"]
+                })
+        
+        # Convert to DataFrame
+        results_df = pd.DataFrame(results)
+        
+        # Print results
+        print("\n" + "="*80)
+        print("MODEL EVALUATION RESULTS (CROSS-VALIDATION)")
+        print("="*80 + "\n")
+        print(tabulate(results_df, headers='keys', tablefmt='grid', showindex=False))
+        
+        # Save to CSV
+        output_csv = os.path.join(self.output_dir, 'sklearn_model_evaluation.csv')
+        results_df.to_csv(output_csv, index=False)
+        logger.info(f"Saved model evaluation results to {output_csv}")
+        
+        # Visualize results
+        self._visualize_model_comparison(results_df)
+        
+        return results_df
+    
+    def _visualize_model_comparison(self, results_df):
+        """Visualize model comparison results."""
+        plt.figure(figsize=(12, 8))
+        
+        # Group by feature set and model
+        feature_sets = results_df['Feature Set'].unique()
+        models = results_df['Model'].unique()
+        
+        # Set up the plot
+        x = np.arange(len(feature_sets))
+        width = 0.25  # Width of the bars
+        
+        # Create grouped bar chart for AUC scores
+        for i, model in enumerate(models):
+            model_results = results_df[results_df['Model'] == model]
+            auc_values = []
+            errors = []
+            
+            for feature_set in feature_sets:
+                feature_set_results = model_results[model_results['Feature Set'] == feature_set]
+                if not feature_set_results.empty:
+                    auc_values.append(feature_set_results['AUC'].values[0])
+                    errors.append(feature_set_results['AUC Std'].values[0])
+                else:
+                    auc_values.append(0)
+                    errors.append(0)
+            
+            # Position bars with offset
+            offset = (i - len(models)/2 + 0.5) * width
+            bars = plt.bar(x + offset, auc_values, width, label=model)
+            
+            # Add error bars
+            plt.errorbar(x + offset, auc_values, yerr=errors, fmt='none', capsize=5, ecolor='black', alpha=0.6)
+            
+            # Add value labels
+            for j, bar in enumerate(bars):
+                height = bar.get_height()
+                plt.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                        f'{height:.3f}', ha='center', va='bottom', fontsize=8)
+        
+        # Customize plot
+        plt.ylabel('AUC Score')
+        plt.title('Model Performance Comparison (AUC)')
+        plt.xticks(x, feature_sets)
+        plt.ylim(0, 1.1)
+        plt.grid(axis='y', alpha=0.3)
+        plt.legend(title='Models')
+        
+        plt.tight_layout()
+        
+        # Save the figure
+        output_file = os.path.join(self.output_dir, 'model_comparison.png')
+        plt.savefig(output_file, dpi=300)
+        plt.close()
+        logger.info(f"Model comparison visualization saved to {output_file}")
     
     def analyze_rankings(self):
         """Analyze the rankings produced by the gradient model."""
@@ -620,8 +865,8 @@ class DatabaseGradientModel:
                 ))
         
         # Calculate ranking metrics
-        avg_rank = np.mean([r[1] for r in known_ranks])
-        median_rank = np.median([r[1] for r in known_ranks])
+        avg_rank = np.mean([r[1] for r in known_ranks]) if known_ranks else np.nan
+        median_rank = np.median([r[1] for r in known_ranks]) if known_ranks else np.nan
         top_10_count = sum(1 for r in known_ranks if r[1] <= 10)
         
         # Print results
@@ -629,7 +874,7 @@ class DatabaseGradientModel:
         print("ENHANCED GRADIENT MODEL RANKING ANALYSIS")
         print("="*80)
         
-        print(f"\nModel features ({len(self.model.feature_names)}):")
+        print(f"\nModel features ({len(self.model.poly_feature_names_)}):")
         feature_weights = self.model.get_feature_weights()
         for feature, weight in sorted(feature_weights.items(), key=lambda x: abs(x[1]), reverse=True):
             print(f"  {feature:<25}: {weight:+.6f}")
@@ -669,21 +914,71 @@ class DatabaseGradientModel:
     
     def _visualize_feature_weights(self):
         """Visualize feature weights from the model."""
-        plt.figure(figsize=(12, 8))
+        plt.figure(figsize=(14, 10))
         
         feature_weights = self.model.get_feature_weights()
         features = list(feature_weights.keys())
         weights = list(feature_weights.values())
         
-        # Sort by absolute weight
-        sorted_indices = np.argsort(np.abs(weights))[::-1]
-        features = [features[i] for i in sorted_indices]
-        weights = [weights[i] for i in sorted_indices]
+        # Categorize features by their type (original, squared, interaction, etc.)
+        feature_types = {}
+        for feature in features:
+            if feature.endswith("^2"):
+                category = "Squared"
+            elif " " in feature:
+                category = "Interaction"
+            else:
+                category = "Original"
+            
+            if category not in feature_types:
+                feature_types[category] = []
+            
+            feature_types[category].append(feature)
         
-        # Create colormap based on weight sign
-        colors = ['#d73027' if w < 0 else '#4575b4' for w in weights]
+        # Sort each category by absolute weight
+        for category, feat_list in feature_types.items():
+            feature_types[category] = sorted(
+                feat_list, 
+                key=lambda f: abs(feature_weights[f]),
+                reverse=True
+            )
         
-        bars = plt.barh(features, weights, color=colors)
+        # Define colors for each category
+        category_colors = {
+            "Original": "#4575b4",  # Blue
+            "Squared": "#d73027",   # Red
+            "Interaction": "#91cf60" # Green
+        }
+        
+        # Prepare data for grouped bar chart
+        all_features = []
+        all_weights = []
+        all_colors = []
+        
+        # Use a fixed order for categories
+        category_order = ["Original", "Squared", "Interaction"]
+        for category in category_order:
+            if category in feature_types:
+                for feature in feature_types[category]:
+                    all_features.append(feature)
+                    all_weights.append(feature_weights[feature])
+                    all_colors.append(category_colors[category])
+        
+        # Sort by absolute weight within each category
+        sorted_indices = np.argsort(np.abs(all_weights))[::-1]
+        all_features = [all_features[i] for i in sorted_indices]
+        all_weights = [all_weights[i] for i in sorted_indices]
+        all_colors = [all_colors[i] for i in sorted_indices]
+        
+        # Truncate to top N features if there are too many
+        max_features = 30
+        if len(all_features) > max_features:
+            all_features = all_features[:max_features]
+            all_weights = all_weights[:max_features]
+            all_colors = all_colors[:max_features]
+        
+        # Create horizontal bar chart
+        bars = plt.barh(all_features, all_weights, color=all_colors)
         
         # Add value labels
         for bar in bars:
@@ -694,15 +989,23 @@ class DatabaseGradientModel:
                     f'{width:.4f}', va='center', ha=alignment, fontweight='bold')
         
         plt.axvline(x=0, color='gray', linestyle='-', alpha=0.3)
-        plt.title('Feature Weights in Enhanced Gradient Model', fontsize=16)
+        plt.title('Feature Weights in Enhanced Polynomial Model', fontsize=16)
         plt.xlabel('Weight Value', fontsize=12)
+        
+        # Add legend for feature types
+        import matplotlib.patches as mpatches
+        legend_patches = [mpatches.Patch(color=category_colors[cat], label=cat) 
+                         for cat in category_order if cat in feature_types]
+        plt.legend(handles=legend_patches, loc='lower right')
+        
+        plt.grid(axis='x', alpha=0.3)
         plt.tight_layout()
         
         # Save the figure
-        output_file = os.path.join(self.output_dir, 'feature_weights.png')
+        output_file = os.path.join(self.output_dir, 'polynomial_feature_weights.png')
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         plt.close()
-        logger.info(f"Feature weights visualization saved to {output_file}")
+        logger.info(f"Polynomial feature weights visualization saved to {output_file}")
     
     def _visualize_top_companies(self):
         """Visualize top companies by gradient score."""
@@ -740,12 +1043,12 @@ class DatabaseGradientModel:
                 va='center'
             )
         
-        plt.title(f'Top {top_n} Companies by Gradient Score', fontsize=14)
-        plt.xlabel('Gradient Score', fontsize=12)
+        plt.title(f'Top {top_n} Companies by Polynomial Model Score', fontsize=14)
+        plt.xlabel('Score', fontsize=12)
         plt.ylabel('')
         plt.grid(axis='x', alpha=0.3)
         
-        # Add legend manually
+        # Add legend
         import matplotlib.patches as mpatches
         red_patch = mpatches.Patch(color='red', label='Known Strong Competitors')
         blue_patch = mpatches.Patch(color='skyblue', label='Other Companies')
@@ -760,18 +1063,19 @@ class DatabaseGradientModel:
         logger.info(f"Top companies visualization saved to {output_file}")
     
     def _visualize_feature_correlations(self):
-        """Visualize correlations between features and gradient score."""
-        # Get feature names used in the model
-        features = self.model.feature_names
+        """Visualize correlations between original features and gradient score."""
+        # Use only the original features, not polynomial ones
+        original_features = self.model.feature_names_in_
         
         # Add gradient score
-        columns_to_correlate = features + ['gradient_score']
+        columns_to_correlate = list(original_features) + ['gradient_score']
         
         # Calculate correlation matrix
         corr_matrix = self.data[columns_to_correlate].corr()
         
         # Create heatmap
         plt.figure(figsize=(12, 10))
+        mask = np.triu(np.ones_like(corr_matrix, dtype=bool))
         sns.heatmap(
             corr_matrix, 
             annot=True, 
@@ -780,7 +1084,8 @@ class DatabaseGradientModel:
             vmax=1, 
             center=0,
             fmt='.2f',
-            linewidths=0.5
+            linewidths=0.5,
+            mask=mask
         )
         plt.title('Feature Correlation Matrix', fontsize=16)
         plt.tight_layout()
@@ -793,9 +1098,9 @@ class DatabaseGradientModel:
 
 
 async def main():
-    """Main entry point for the script."""
+    """Main entry point for the script with polynomial feature support."""
     start_time = datetime.now()
-    logger.info("Starting Enhanced Gradient Model")
+    logger.info("Starting Enhanced Gradient Model with Polynomial Features")
     
     # Initialize database connection
     db = DbConnection()
@@ -820,7 +1125,21 @@ async def main():
         # Calculate additional metrics
         enhanced_df = await model.calculate_additional_metrics(competitors_df, target_company)
         
-        # Build gradient model
+        # Run model evaluation with cross-validation
+        logger.info("Running model evaluation with cross-validation")
+        feature_sets = {
+            "Basic": ['common_projects', 'common_departments', 'win_rate'],
+            "Standard": ['common_projects', 'common_departments', 'dept_wins', 
+                       'total_win_value', 'win_rate'],
+            "Full": ['common_projects', 'common_departments', 'common_subdepartments',
+                   'dept_wins', 'total_win_value', 'win_rate', 'price_range_overlap',
+                   'recent_activity_score', 'dept_engagement_score', 'subdept_specialization']
+        }
+        evaluation_results = model.evaluate_models_with_cv(enhanced_df, feature_sets)
+        
+        # Build the best gradient model based on evaluation
+        # For this example, we'll use the full model with square and sqrt features
+        logger.info("Building the best polynomial gradient model")
         if not model.build_gradient_model(enhanced_df):
             logger.error("Failed to build gradient model")
             return
@@ -831,10 +1150,12 @@ async def main():
         # Create visualizations
         model.visualize_results()
         
-        logger.info("Enhanced gradient model analysis complete")
+        logger.info("Enhanced gradient model analysis with polynomial features complete")
         
     except Exception as e:
         logger.error(f"Error in main execution: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
     finally:
         # Close database connection
         await db.close()
@@ -842,6 +1163,7 @@ async def main():
         logger.info(f"Script execution completed in {elapsed_time:.2f} seconds")
 
 
+# This is crucial - actually run the main function when the script is executed
 if __name__ == "__main__":
     # Ensure event loop compatibility for different OS
     if sys.platform == "win32":
