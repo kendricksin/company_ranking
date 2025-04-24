@@ -4,3 +4,4 @@ venv/
 *.log
 scoring_results/
 *output/
+__pycache__/
